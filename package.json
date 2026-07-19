@@ -9,7 +9,7 @@
     "crypto-js": "^4.2.0",
     "fast-json-stable-stringify": "^2.1.0",
     "qs": "^6.11.2",
-    "uuid": "^9.0.1"
+    "uuid": "^11.1.1"
   },
   "description": "Flexible API client toolkit with retry, circuit-breaker, caching and auth strategies.",
   "main": "./dist/index.cjs",
