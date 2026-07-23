@@ -24,51 +24,94 @@ It serves as a central gateway for executing, securing, and managing HTTP reques
 
 ## 🛠️ Initialization & Setup
 
-Before using `ApiCenter`, initialize it with your API configuration. Thanks to **Environment Auto-Detection**, it will automatically configure the best storage and network defaults whether you are running in a Browser or Node.js!
+`ApiCenter` automatically detects its environment and adapts its behavior, but you still need to provide your base configuration.
 
-```javascript
-import { initApiCenter } from '@infeya/api-center';
+### Frontend Setup Example (React / Vue / Browser)
 
-// Zero-Config Initialization!
-initApiCenter({
-  http: {
-    hosts: {
-      primary: {
-        baseURL: 'https://api.mycompany.com',
-        auth: { strategy: 'bearer' },
-        headers: { 'X-App-Client': 'web-portal' }
-      },
-      secondary: {
-        baseURL: 'https://api-backup.mycompany.com',
-        auth: { strategy: 'bearer' }
-      }
-    },
-    defaultHost: 'primary'
-  },
-  authEngine: {
-    applyAuth: (config, api) => {
-      // Inject Authorization headers based on API requirements
-      const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
-      if (token) config.headers['Authorization'] = `Bearer ${token}`;
-    },
-    handleAuthError: async (error, originalRequest, api) => {
-      // Execute token refresh, then return updated config to retry the request
-      const freshToken = await performTokenRefresh();
-      originalRequest.headers['Authorization'] = `Bearer ${freshToken}`;
-      return originalRequest;
-    }
-  }
-});
-```
+In a frontend application, initialization typically happens at the entry point of your app.
 
 > [!TIP]
-> **Node.js Advanced Usage:** By default, Node.js uses an in-memory fallback for the offline queue. If you want persistent queuing across server restarts, simply inject a custom `storageAdapter` (e.g., Redis).
+> **Usage Idea:** In frontend environments, use the `authEngine` to automatically sync your JWT or Bearer tokens from `localStorage` into the request headers.
+
+```javascript
+// frontend-api-init.js
+import { initApiCenter } from '@infeya/api-center';
+
+export function initializeFrontendApi() {
+  initApiCenter({
+    http: {
+      hosts: {
+        primary: {
+          baseURL: process.env.REACT_APP_API_URL || 'https://api.mycompany.com',
+          auth: { strategy: 'bearer' },
+          headers: { 'X-App-Client': 'web-portal' }
+        }
+      },
+      defaultHost: 'primary'
+    },
+    authEngine: {
+      applyAuth: (config) => {
+        const token = localStorage.getItem('access_token');
+        if (token) config.headers['Authorization'] = `Bearer ${token}`;
+      },
+      handleAuthError: async (error, originalRequest) => {
+        try {
+          const freshToken = await refreshMyTokenSomehow();
+          localStorage.setItem('access_token', freshToken);
+          originalRequest.headers['Authorization'] = `Bearer ${freshToken}`;
+          return originalRequest; // Retry
+        } catch (refreshError) {
+          window.location.href = '/login';
+          throw refreshError;
+        }
+      }
+    }
+  });
+}
+```
+
+### Backend Setup Example (Node.js / Express / NestJS)
+
+Because backends handle multi-tenant requests simultaneously, state is shared. Token injection often requires passing context per-request rather than reading a global store.
+
+> [!WARNING]
+> **Important Note for Backends:** Do not rely on global token variables. Pass dynamic auth tokens per-request using `ApiCenter` options instead.
+
+```javascript
+// backend-api-init.js
+import { initApiCenter } from '@infeya/api-center';
+import { RedisStorageAdapter } from './my-custom-redis-adapter';
+
+export function initializeBackendApi() {
+  initApiCenter({
+    http: {
+      hosts: {
+        billingService: {
+          baseURL: process.env.BILLING_SERVICE_URL || 'http://internal-billing-service:3000',
+          auth: { strategy: 'hmac' }
+        },
+        thirdPartyVendor: {
+          baseURL: 'https://vendor-api.example.com',
+          headers: { 'x-api-key': process.env.VENDOR_API_KEY }
+        }
+      },
+      defaultHost: 'billingService'
+    },
+    storageAdapter: new RedisStorageAdapter(process.env.REDIS_URL), // Optional persistence
+    authEngine: {
+      applyAuth: (config) => {
+        config.headers['X-Server-Timestamp'] = Date.now().toString();
+      }
+    }
+  });
+}
+```
 
 ---
 
 ## 📖 API Book Specification & Properties
 
-API Endpoints are defined declaratively in an **API Book**. Each entry represents a configured endpoint supporting several orchestration settings:
+The **API Book** is your declarative single source of truth for all API definitions. Instead of scattering URLs throughout your components, you define them all in one or more centralized files.
 
 ### Endpoint Schema Reference Table
 
@@ -77,196 +120,325 @@ API Endpoints are defined declaratively in an **API Book**. Each entry represent
 | **`key`** | `string` | *Required* | Unique identifier used for rate-limiting, deduplication, and circuit breaker states. |
 | **`route`** | `string` | *Required* | Path of the endpoint. Supports dynamic slugs (e.g. `/users/:id`). |
 | **`method`** | `string` | `'GET'` | HTTP Verb (e.g. `GET`, `POST`, `PUT`, `PATCH`, `DELETE`). |
-| **`auth`** | `boolean \| Object` | `true` | `true` (inherits host auth), `false` (no auth), or `Object` specifying target auth strategy settings. |
-| **`retry`** | `Object` | `undefined` | `{ count: number, delay: number }`. Max retry attempts on transient network/5xx errors and base delay in ms. |
-| **`circuit`** | `Object` | `undefined` | `{ failureThreshold: number, cooldown: number }`. Automatically fails fast after threshold is met; retries after cooldown. |
-| **`cache`** | `Object` | `undefined` | `{ ttl: number }`. In-memory response caching duration in milliseconds (GET only). |
-| **`dedupe`** | `boolean` | `false` | Collapses concurrent identical requests into a single flight, resolving them with the same promise. |
-| **`idempotent`** | `boolean` | `false` | Generates a stable `Idempotency-Key` header for write operations. Reuses keys during retry blocks. |
-| **`rateLimit`** | `Object` | `undefined` | `{ limit: number, interval: number }`. Token bucket rate limits client calls (e.g., max 5 requests per 1000ms). |
-| **`offlineQueue`** | `boolean` | `false` | Queues requests in LocalStorage if offline. Replays requests in FIFO order when connectivity returns. |
-| **`version`** | `Object` | `undefined` | `{ type: 'path'\|'header'\|'query', value: string }`. Adds API versioning (e.g., `/v1/users`, `X-API-Version: 1`). |
-| **`signing`** | `Object` | `undefined` | `{ secret: string }`. Automatically calculates HMAC/SHA256 signature hashes and injects signature headers. |
-| **`hmac`** | `Object` | `undefined` | `{ key: string, secret: string }`. Injects secure HMAC authorization signatures for internal or API Gateway verification. |
+| **`auth`** | `boolean \| Object` | `true` | `true` (inherits host auth), `false` (no auth), or target auth strategy. |
+| **`retry`** | `Object` | `undefined` | `{ count, delay }`. Max retries on transient network/5xx errors. |
+| **`circuit`** | `Object` | `undefined` | `{ failureThreshold, cooldown }`. Automatically fails fast after threshold is met. |
+| **`cache`** | `Object` | `undefined` | `{ ttl }`. In-memory response caching duration (GET only). |
+| **`dedupe`** | `boolean` | `false` | Collapses concurrent identical requests into a single flight. |
+| **`idempotent`** | `boolean` | `false` | Generates a stable `Idempotency-Key` header for safe retries on mutations. |
+| **`rateLimit`** | `Object` | `undefined` | `{ limit, interval }`. Client-side token bucket rate limits. |
+| **`offlineQueue`** | `boolean` | `false` | Queues requests if offline. Replays in FIFO order on connectivity. |
+| **`version`** | `Object` | `undefined` | `{ type, value }`. Adds API versioning (e.g., `X-API-Version: 1`). |
+| **`host`** | `string` | `undefined` | Directs the endpoint to a specific configured host (e.g., `billingService`). |
+| **`headers`** | `Object` | `undefined` | Declaratively injects static headers (e.g. `Accept: application/pdf`). |
+
+### Declaring Your Endpoints
+
+```javascript
+// apiBook.js
+export const API_CATALOG = {
+  GET_SYSTEM_CONFIG: {
+    key: 'get-sys-config',
+    route: '/api/v1/config',
+    method: 'GET',
+    auth: false
+  },
+  GET_USER_PROFILE: {
+    key: 'get-user-profile',
+    route: '/api/v1/users/:userId',
+    method: 'GET',
+    auth: true,
+    cache: { ttl: 60000 },
+    dedupe: true
+  },
+  UPDATE_USER_PREFERENCES: {
+    key: 'update-user-preferences',
+    route: '/api/v1/users/:userId/preferences',
+    method: 'PATCH',
+    auth: true,
+    offlineQueue: true,
+    retry: { count: 3, delay: 1000 }
+  }
+};
+```
 
 ---
 
-## 🚀 Usage & Examples
+## 🚀 Routing, Headers, and Executing Requests
 
-### 1. Declaring your endpoints (e.g. `apiBook.js`)
+When you invoke an API via the `dial` function, you pass payload configuration. `ApiCenter` categorizes your input into three distinct types:
+
+1. **`slug`**: Used to replace dynamic URL segments (e.g., `:id`).
+2. **`params`**: Appended to the URL as query string parameters (e.g., `?search=term`).
+3. **`body`**: Sent as the payload for mutative requests (POST, PUT, PATCH).
+
+### Static Routes vs. Dynamic Routes
+
 ```javascript
-export const GET_USER = {
-  key: 'get-user',
-  route: '/users/:userId',
+import { dial } from '@infeya/api-center';
+import { API_CATALOG } from './apiBook';
+
+// 1. Static Route Example (using 'params' for Query String)
+async function fetchConfig() {
+  const res = await dial(API_CATALOG.GET_SYSTEM_CONFIG, {
+    params: { platform: 'web' } // GET /api/v1/config?platform=web
+  });
+  return res.data;
+}
+
+// 2. Dynamic Route Example (using 'slug')
+async function fetchUser(id) {
+  const res = await dial(API_CATALOG.GET_USER_PROFILE, {
+    slug: { userId: id } // Replaces ':userId' -> GET /api/v1/users/123
+  });
+  return res.data;
+}
+```
+
+### Overriding Hosts and Headers Dynamically
+
+You can target specific hosts or inject dynamic headers via the options object inside the `dial` function.
+
+```javascript
+async function fetchFromBackupHost(userId, userTimezone) {
+  const response = await dial(
+    API_CATALOG.GET_USER_PROFILE,
+    { slug: { userId } },
+    { 
+      host: 'secondary', // Override default host
+      headers: { 'X-User-Timezone': userTimezone } // Inject dynamic header
+    }
+  );
+  return response.data;
+}
+```
+
+---
+
+## 📦 Handling Different Types of Body Data
+
+`ApiCenter` simplifies sending various types of body payloads.
+
+#### 1. JSON (Default)
+Passing a standard JavaScript object automatically serializes to JSON.
+```javascript
+const res = await dial(API_CATALOG.CREATE_POST, {
+  body: { title: "Hello", content: "World" } 
+});
+```
+
+#### 2. Form Data & File Uploads
+Pass a native `FormData` object to handle `multipart/form-data`.
+```javascript
+const formData = new FormData();
+formData.append('avatar', fileBlob, 'avatar.png');
+formData.append('userId', userId);
+
+const res = await dial(API_CATALOG.UPLOAD_AVATAR, { body: formData });
+```
+
+#### 3. URL Encoded
+Use native `URLSearchParams` for `application/x-www-form-urlencoded`.
+```javascript
+const params = new URLSearchParams();
+params.append('grant_type', 'password');
+params.append('username', username);
+
+const res = await dial(API_CATALOG.OAUTH_LOGIN, { body: params });
+```
+
+#### 4. Raw Text, HTML, XML
+Send raw strings by overriding the `Content-Type` header.
+```javascript
+const res = await dial(API_CATALOG.PROCESS_XML, {
+  body: `<user><name>John</name></user>`
+}, {
+  headers: { 'Content-Type': 'application/xml' } 
+});
+```
+
+#### 5. Binary Data (Blob / ArrayBuffer)
+Pass the `Blob` directly into the body.
+```javascript
+const res = await dial(API_CATALOG.UPLOAD_RAW_IMAGE, {
+  body: fileBlob
+}, {
+  headers: { 'Content-Type': 'image/jpeg' }
+});
+```
+
+#### 6. GraphQL
+Send an object containing `query` and `variables`.
+```javascript
+const res = await dial(API_CATALOG.GRAPHQL_ENDPOINT, {
+  body: { query: GQL_QUERY, variables: { id: userId } }
+});
+```
+
+---
+
+## 🛡️ Advanced Resiliency Features
+
+### Circuit Breaker Kicked
+Protects backends from cascading failures. If an endpoint fails repeatedly, the circuit breaker trips and blocks subsequent requests locally for a cooldown period.
+```javascript
+export const GET_ANALYTICS = {
+  key: 'get-analytics',
+  route: '/api/v1/analytics',
   method: 'GET',
-  auth: true,
-  cache: { ttl: 15000 }, // Cache response for 15s
-  dedupe: true,          // Collapse duplicate calls
+  circuit: { failureThreshold: 3, cooldown: 30000 }
 };
 
-export const CREATE_PAYMENT = {
-  key: 'create-payment',
-  route: '/payments',
+// If tripped, response.success is false and message includes "Circuit".
+```
+
+### Cache Data
+Stores the response in memory (by default) for a specified TTL.
+```javascript
+export const GET_COUNTRIES = {
+  key: 'get-countries',
+  route: '/api/v1/reference/countries',
+  method: 'GET',
+  cache: { ttl: 3600000 } // Cache for 1 hour
+};
+```
+
+### Deduplication
+Catches concurrent identical requests in-flight, sends only *one* network request, and distributes the exact same response to all callers.
+```javascript
+export const GET_ME = {
+  key: 'get-me',
+  route: '/api/v1/users/me',
+  method: 'GET',
+  dedupe: true
+};
+```
+
+### Rate Limits
+Implements a client-side token bucket to intentionally throttle requests.
+```javascript
+export const REFRESH_STATUS = {
+  key: 'refresh-status',
+  route: '/api/v1/status',
+  method: 'GET',
+  rateLimit: { limit: 2, interval: 5000 }
+};
+```
+
+### Idempotency Keys
+Guarantees that a mutative operation (like processing a payment) happens *exactly once*, even if the network fails and retries.
+```javascript
+export const CHARGE_CREDIT_CARD = {
+  key: 'charge-card',
+  route: '/api/v1/payments/charge',
   method: 'POST',
-  auth: true,
-  idempotent: true,      // Safe retries without duplicate charges
-  retry: { count: 3, delay: 500 },
-  circuit: { failureThreshold: 3, cooldown: 15000 },
-};
-
-export const UPDATE_STATUS_OFFLINE = {
-  key: 'update-status-offline',
-  route: '/users/:userId/status',
-  method: 'PATCH',
-  auth: true,
-  offlineQueue: true,    // Enqueues request if browser is offline
+  idempotent: true, 
+  retry: { count: 3, delay: 1000 }
 };
 ```
 
-### 2. Basic GET Request (with parameters and caching)
-```javascript
-import { dial } from '@infeya/api-center';
-import { GET_USER } from './apiBook';
+---
 
-async function fetchUser(userId) {
-  const result = await dial(
-    GET_USER,
-    { slug: { userId } } // Replaces ':userId' in route
-  );
+## 🛑 Cancelling/Aborting In-flight Requests
 
-  if (result.success) {
-    console.log('User data:', result.data);
-  } else {
-    console.error('Error fetching user:', result.message);
-  }
-}
-```
-
-### 3. POST Request with Idempotency & Resiliency
-```javascript
-import { dial } from '@infeya/api-center';
-import { CREATE_PAYMENT } from './apiBook';
-
-async function submitPayment(amount, currency) {
-  const result = await dial(
-    CREATE_PAYMENT,
-    {
-      body: { amount, currency }
-    }
-  );
-
-  if (result.success) {
-    console.log('Payment successful. Receipt:', result.data);
-  } else {
-    // If the circuit breaker kicked in
-    if (result.uiClass === 'error' && result.message.includes('Circuit')) {
-      alert('Payment service is temporarily down. Please wait before retrying.');
-    } else {
-      alert(result.message);
-    }
-  }
-}
-```
-
-### 4. Cancelling/Aborting In-flight Requests
-Use an `abortKey` to cancel previous requests matching the same key (perfect for search auto-completes).
+A common pattern is cancelling a request that is no longer needed (like search autocomplete). `ApiCenter` simplifies this using an `abortKey`.
 
 ```javascript
 import { dial, abort } from '@infeya/api-center';
 
-const SEARCH_PRODUCTS = {
-  key: 'search-products',
-  route: '/catalog/search',
-  method: 'GET'
-};
+async function handleUserInput(typingQuery) {
+  abort('global-search-input'); // Cancel existing requests
 
-async function executeSearch(query) {
-  // Cancel any active search requests with this key
-  abort('product-autocomplete');
-
-  const result = await dial(
-    SEARCH_PRODUCTS,
-    { params: { q: query } },
-    { abortKey: 'product-autocomplete' } // Register this request to the key
+  const response = await dial(
+    SEARCH_AUTOCOMPLETE,
+    { params: { q: typingQuery } },
+    { abortKey: 'global-search-input' }
   );
 
-  if (result.success) {
-    renderList(result.data);
-  } else if (result.uiClass === 'cancelled') {
-    console.log('Search cancelled by newer input.');
+  if (response.uiClass === 'cancelled') {
+    return; // Request was aborted gracefully
   }
 }
 ```
 
 ---
 
-## 📦 Unified Response Contract
+## 🤝 Unified Response Contract
 
-All network resolutions, errors, and rejections are parsed and normalized into a single **`UnifiedResponse`** format. Your application code never has to parse Axios exceptions or inspect raw response structures directly.
+All network resolutions, errors, and rejections are parsed and normalized into a single **`UnifiedResponse`** format. You never have to wrap your `dial` calls in `try/catch` blocks for network errors!
 
 ```typescript
 interface UnifiedResponse {
-  success: boolean;       // True for HTTP 2xx statuses
-  statusCode: number;     // HTTP Status Code (e.g. 200, 422, or 599 for client network timeout)
-  message: string | null; // UI-ready fallback message describing the result
-  data: any | null;       // Unwrapped HTTP JSON body payload
-  errors: any | null;     // Key-value validation errors (mainly from status 400 or 422)
-  queued?: boolean;       // Present and true if request was queued offline
+  success: boolean;       // Easy check: HTTP 200-299 statuses
+  statusCode: number;     // e.g., 200, 404, 422, or 599 for offline/timeouts
+  message: string | null; // A safe, human-readable message 
+  data: any | null;       // The parsed JSON payload from the server 
+  errors: any | null;     // Key-value validation errors 
+  queued?: boolean;       // True if offline Queue captured this request
   
-  // UI Presentation Helpers
+  // UI Helpers (Automatically computed for styling frameworks)
   uiClass: 'success' | 'warning' | 'error' | 'info' | 'network' | 'cancelled';
   uiVariant: 'success' | 'warning' | 'danger' | 'info' | 'secondary' | null;
-  
-  meta: {
-    timestamp: number;    // Client timestamp when parsing took place
-  };
 }
 ```
 
 ### Contextual UI Presentation
-Instead of writing complex logic matching status codes to styling components, use the parsed `uiVariant` directly in your UI component frameworks (e.g. matching Bootstrap CSS classes or alert variants):
+Because `uiVariant` directly maps to popular CSS frameworks, you can pass it directly into your toast or alert systems:
 
 ```javascript
-const response = await dial(UPDATE_PROFILE, { body: formData });
+const response = await dial(API_CATALOG.CREATE_POST, { body: postData });
 
-if (!response.success && response.uiVariant) {
-  // Will map to 'danger' alert box or 'warning' badge automatically
-  renderAlert(response.message, response.uiVariant);
+if (!response.success) {
+  myToastNotificationSystem.show({
+    title: "Action Failed",
+    description: response.message,
+    variant: response.uiVariant // 'danger', 'warning', etc.
+  });
 }
 ```
 
----
+### Customizing the Global Response Contract
 
-## 🔍 Debugging & State Snapshots
+Every project has unique backend requirements. If your backend wraps all responses in a custom envelope (like `{ "status": "ok", "payload": { ... } }`), or if you want to globally map specific error codes to custom messages, you can define a **Response Interceptor/Adapter** during the initial setup!
 
-For diagnostics and tracing, `ApiCenter` modules expose state inspection helper hooks:
+You can use the `responseAdapter` within your `initApiCenter` configuration to globally transform the raw server response into the standardized `UnifiedResponse` format before it ever reaches your application logic.
 
-*   **Cache:** `import { getCacheSnapshot } from '@infeya/api-center/cache/edgeCache'`
-*   **Circuit Breakers:** `import { getCircuitSnapshot } from '@infeya/api-center/core/circuitBreaker'`
-*   **Deduplication:** `import { getDeduplicationSnapshot } from '@infeya/api-center/core/deduplicator'`
-*   **Rate Limits:** `import { getRateLimitSnapshot } from '@infeya/api-center/core/rateLimiter'`
-*   **Idempotency Keys:** `import { getIdempotencySnapshot } from '@infeya/api-center/core/idempotency'`
+```javascript
+import { initApiCenter } from '@infeya/api-center';
 
----
+initApiCenter({
+  http: { /* ... hosts config ... */ },
+  
+  // Globally intercept and map all incoming responses
+  responseAdapter: (rawAxiosResponse, defaultUnifiedResponse) => {
+    
+    // Example 1: Unwrap a custom backend payload envelope
+    if (rawAxiosResponse.data && rawAxiosResponse.data.payload) {
+      // Elevate the deeply nested payload to the root 'data' property
+      defaultUnifiedResponse.data = rawAxiosResponse.data.payload;
+    }
 
-## 🧪 Testing & Building
+    // Example 2: Map custom backend error messages
+    if (!defaultUnifiedResponse.success && rawAxiosResponse.data?.errorMsg) {
+      // Map your backend's custom error property to the unified 'message'
+      defaultUnifiedResponse.message = rawAxiosResponse.data.errorMsg;
+    }
+    
+    // Example 3: Inject custom UI variants based on your company's design system
+    if (defaultUnifiedResponse.statusCode === 402) {
+      defaultUnifiedResponse.uiVariant = 'payment-required-alert';
+      defaultUnifiedResponse.message = 'Please update your billing details.';
+    }
 
-### Running Tests
-
-This project uses the native Node.js test runner (`node:test`) along with `tsx` to support ES Modules.
-
-```bash
-# Install dependencies (if you haven't already)
-npm install
-
-# Run the test suite
-npm test
+    return defaultUnifiedResponse; // Return the mutated contract!
+  }
+});
 ```
 
-### Building the Package
+---
 
-The package uses `tsup` to bundle and emit isomorphic entry points (both CommonJS and ESM formats). The build automatically captures subdirectories (`core/`, `auth/`, etc.) ensuring deep imports work as expected.
+*By leveraging the declarative API books and standardizing your communication through `ApiCenter`, you decouple your business logic from network volatility. This setup drastically reduces boilerplate and provides enterprise-level application stability out of the box!*
 
-```bash
-npm run build
-```
+---
+
+**Author by : Infeya Technologys Group**

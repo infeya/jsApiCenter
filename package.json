@@ -1,6 +1,6 @@
 {
   "name": "@infeya/api-center",
-  "version": "1.0.3",
+  "version": "1.0.5",
   "type": "module",
   "peerDependencies": {
     "axios": "^1.0.0"
@@ -9,7 +9,7 @@
     "crypto-js": "^4.2.0",
     "fast-json-stable-stringify": "^2.1.0",
     "qs": "^6.11.2",
-    "uuid": "^9.0.1"
+    "uuid": "^14.0.1"
   },
   "description": "Flexible API client toolkit with retry, circuit-breaker, caching and auth strategies.",
   "main": "./dist/index.cjs",
@@ -67,8 +67,8 @@
   },
   "devDependencies": {
     "tsup": "^8.5.1",
-    "tsx": "^4.23.0",
-    "typescript": "^6.0.3"
+    "tsx": "^4.23.1",
+    "typescript": "^7.0.2"
   },
   "repository": {
     "type": "git",
