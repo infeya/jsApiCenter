@@ -88,10 +88,7 @@
   "author": "Infeya",
   "copyright": "Copyright (c) 2026 Infeya",
   "license": "MIT",
-  "bugs": {
-    "url": "https://github.com/your-org/ApiCenter/issues"
-  },
-  "homepage": "https://github.com/your-org/ApiCenter#readme",
+  "homepage": "https://infeya.github.io/jsApiCenter/",
   "engines": {
     "node": ">=14"
   },
